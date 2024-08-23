@@ -2,6 +2,7 @@ import streamlit as st
 from openai import OpenAI
 import json
 import os
+from datetime import datetime
 
 # Initialize OpenAI client
 @st.cache_resource
@@ -17,23 +18,41 @@ HISTORY_FILE = "chat_history.json"
 def load_chat_history():
     if os.path.exists(HISTORY_FILE):
         with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return [{"role": "system", "content": "You are a helpful assistant"}]
+            try:
+                # Try to load as a single JSON object (new format)
+                data = json.load(f)
+                if isinstance(data, dict) and "conversations" in data:
+                    return data
+                else:
+                    # If it's not in the new format, convert it
+                    return {"conversations": [{"id": "legacy", "timestamp": datetime.now().isoformat(), "messages": data}]}
+            except json.JSONDecodeError:
+                # If it fails, try to load as JSON Lines (old format)
+                f.seek(0)
+                messages = [json.loads(line) for line in f if line.strip()]
+                return {"conversations": [{"id": "legacy", "timestamp": datetime.now().isoformat(), "messages": messages}]}
+    return {"conversations": []}
 
 # Function to save chat history
-def save_chat_history(messages):
+def save_chat_history(history):
     with open(HISTORY_FILE, "w", encoding="utf-8") as f:
-        json.dump(messages, f, ensure_ascii=False, indent=2)
+        json.dump(history, f, ensure_ascii=False, indent=2)
+
+# Initialize session state
+if "history" not in st.session_state:
+    st.session_state.history = load_chat_history()
+
+if "current_conversation" not in st.session_state:
+    st.session_state.current_conversation = []
+
+if "conversation_id" not in st.session_state:
+    st.session_state.conversation_id = datetime.now().strftime("%Y%m%d%H%M%S")
 
 # Streamlit app title
 st.title("🤖️ 江流儿的Chatbot")
 
-# Initialize session state for conversation history
-if "messages" not in st.session_state:
-    st.session_state.messages = load_chat_history()
-
-# Display chat history
-for message in st.session_state.messages[1:]:  # Skip the system message
+# Display current conversation
+for message in st.session_state.current_conversation:
     with st.chat_message(message["role"]):
         st.write(message["content"])
 
@@ -41,9 +60,9 @@ for message in st.session_state.messages[1:]:  # Skip the system message
 user_input = st.chat_input("Type your message here...")
 
 if user_input:
-    # Append user message to conversation history
-    st.session_state.messages.append({"role": "user", "content": user_input})
-    save_chat_history(st.session_state.messages)
+    # Append user message to current conversation
+    user_message = {"role": "user", "content": user_input}
+    st.session_state.current_conversation.append(user_message)
     
     with st.chat_message("user"):
         st.write(user_input)
@@ -52,20 +71,45 @@ if user_input:
     with st.spinner("Thinking..."):
         response = client.chat.completions.create(
             model="claude-3-5-sonnet-20240620",
-            messages=st.session_state.messages,
+            messages=st.session_state.current_conversation,
             stream=False
         )
 
-    # Append assistant response to conversation history
-    assistant_response = response.choices[0].message.content
-    st.session_state.messages.append({"role": "assistant", "content": assistant_response})
-    save_chat_history(st.session_state.messages)
+    # Append assistant response to current conversation
+    assistant_message = {"role": "assistant", "content": response.choices[0].message.content}
+    st.session_state.current_conversation.append(assistant_message)
     
     with st.chat_message("assistant"):
-        st.write(assistant_response)
+        st.write(assistant_message["content"])
 
-# Option to clear chat history
-if st.button("Clear Chat History"):
-    st.session_state.messages = [{"role": "system", "content": "You are a helpful assistant"}]
-    save_chat_history(st.session_state.messages)
-    st.experimental_rerun()
+    # Update history
+    current_conversation = {
+        "id": st.session_state.conversation_id,
+        "timestamp": datetime.now().isoformat(),
+        "messages": st.session_state.current_conversation
+    }
+    
+    # Check if the conversation already exists in history
+    existing_conv = next((conv for conv in st.session_state.history["conversations"] if conv["id"] == st.session_state.conversation_id), None)
+    
+    if existing_conv:
+        existing_conv.update(current_conversation)
+    else:
+        st.session_state.history["conversations"].append(current_conversation)
+    
+    # Save updated history
+    save_chat_history(st.session_state.history)
+
+# Option to start a new conversation
+if st.button("Start New Conversation"):
+    st.session_state.conversation_id = datetime.now().strftime("%Y%m%d%H%M%S")
+    st.session_state.current_conversation = []
+    st.rerun()
+
+# Option to view conversation history
+if st.button("View Conversation History"):
+    st.write("Conversation History:")
+    for conv in st.session_state.history["conversations"]:
+        st.write(f"Conversation ID: {conv['id']}, Timestamp: {conv['timestamp']}")
+        if st.button(f"View Conversation {conv['id']}"):
+            st.write(json.dumps(conv['messages'], indent=2))
